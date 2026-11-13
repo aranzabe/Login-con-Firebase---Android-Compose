@@ -1,0 +1,36 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# --- Datos sensibles ---
+
+# Credenciales de Firebase (client IDs, API keys del proyecto)
+app/google-services.json
+google-services.json
+
+# Firmas de la app (claves de release, nunca deben subirse al repo)
+*.jks
+*.keystore
+keystore.properties
+
+# Ficheros de entorno con secretos (tokens, API keys, contraseñas...)
+*.env
+.env
+.env.*
+
+# Resto del .idea con posibles rutas/datos locales sensibles
+/.idea/
+.kotlin/
+
