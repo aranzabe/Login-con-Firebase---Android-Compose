@@ -19,17 +19,17 @@ solo observa estado y dibuja.
 ```
 LoginScreen (Composable)          LoginViewModel
 ┌─────────────────────┐           ┌───────────────────────────┐
-│ observa StateFlow    │ <──────── │ isLoading                 │
-│ dibuja UI            │           │ loginSuccess               │
-│ llama a funciones    │ ────────> │ errorMessage               │
-│ del ViewModel        │           │ googleToastMessage         │
-└─────────────────────┘           │                            │
-                                   │ loginWithEmail()           │
-                                   │ registerWithEmail()        │
-                                   │ launchGoogle()             │
-                                   │ loginWithGoogle()          │
-                                   │ signOut()                  │
-                                   └───────────────────────────┘
+│ observa StateFlow   │ <──────── │ isLoading                 │
+│ dibuja UI           │           │ loginSuccess              │
+│ llama a funciones   │ ────────> │ errorMessage              │
+│ del ViewModel       │           │ googleToastMessage        │
+└─────────────────────┘           │                           │
+                                  │ loginWithEmail()          │
+                                  │ registerWithEmail()       │
+                                  │ launchGoogle()            │
+                                  │ loginWithGoogle()         │
+                                  │ signOut()                 │
+                                  └───────────────────────────┘
 ```
 
 Reglas de oro:
@@ -434,7 +434,7 @@ reacciona al nuevo valor.
 
 ---
 
-## 7. Errores típicos al configurarlo (para depurar en clase)
+## 7. Errores típicos al configurarlo
 
 | Síntoma | Causa probable |
 |---|---|
