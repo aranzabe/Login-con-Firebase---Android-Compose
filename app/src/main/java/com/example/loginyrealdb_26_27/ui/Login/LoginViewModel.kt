@@ -27,6 +27,7 @@ import kotlinx.coroutines.launch
  * los MutableStateFlow privados.
  */
 class LoginViewModel : ViewModel() {
+    private val TAG = "Fernando"
 
     private val auth = FirebaseAuth.getInstance()
 
@@ -110,6 +111,8 @@ class LoginViewModel : ViewModel() {
 
                 val result = credentialManager.getCredential(context, request)
                 val credential = GoogleIdTokenCredential.createFrom(result.credential.data)
+                Log.e(TAG,credential.displayName.toString())
+                Log.e(TAG,credential.familyName.toString())
                 loginWithGoogle(credential.idToken)
             } catch (_: GetCredentialCancellationException) {
                 _googleToastMessage.value = "Inicio con Google cancelado por el usuario"

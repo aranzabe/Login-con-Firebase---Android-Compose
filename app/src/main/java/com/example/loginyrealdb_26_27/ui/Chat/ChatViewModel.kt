@@ -19,7 +19,7 @@ import kotlinx.coroutines.launch
 
 /** Chat almacenado en Firebase Realtime Database. */
 class ChatViewModel : ViewModel() {
-    val TAG = "Fernando"
+    private val TAG = "Fernando"
     private val mensajesReference = FirebaseDatabase.getInstance()
         .getReference(Colecciones.mensajes)
 
