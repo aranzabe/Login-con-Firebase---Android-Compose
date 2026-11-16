@@ -445,3 +445,399 @@ reacciona al nuevo valor.
 | El Toast de Google aparece duplicado o no desaparece | No se llamó a `consumeGoogleToastMessage()` tras mostrarlo |
 
 ---
+
+## 8. Realtime Database: listado de usuarios reactivo
+
+Pantalla: `RealTimeDBVentana.kt`. Componentes: `UsuarioRepository`,
+`MiViewModelRealtime` y la pantalla en sí.
+
+### 8.1 Arquitectura
+
+```
+RealTimeDBVentana (Composable)     MiViewModelRealtime          UsuarioRepository
+┌─────────────────────┐           ┌───────────────────────┐      ┌─────────────────────────┐
+│ observa StateFlow   │ <──────── │ usuarios              │ <─── │ usuarios: Flow<...>     │
+│ dibuja la lista     │           │ codigoError           │      │ (callbackFlow sobre     │
+│ llama a funciones   │ ────────> │ usuariosBorrados      │      │  addValueEventListener) │
+│ del ViewModel       │           │ errorMessage          │      │                         │
+└─────────────────────┘           │                       │      │ agregar()               │
+                                  │ agregarUsuario()      │ ───> │ borrarPorNombre()       │
+                                  │ borrarUsuario()       │      │ borrarPorId()           │
+                                  │ borrarUsuarioPorId()  │      │ usuariosMenoresDeEdad() │
+                                  │ borrarUsuariosMenor-  │      │ eliminarSnapshot()      │
+                                  │   DeEdad2()           │      └─────────────────────────┘
+                                  └───────────────────────┘
+```
+
+Regla de oro (la misma que en el login): **la UI no toca Firebase directamente**,
+y ahora añadimos una capa más: **el ViewModel tampoco toca Firebase directamente**.
+Todo el código que sabe que existe `FirebaseDatabase` vive en el
+`UsuarioRepository`. El ViewModel solo conoce el repositorio (una interfaz de
+"usuarios" como lista de datos), y la UI solo conoce el ViewModel.
+
+Esto se llama **patrón Repository**: separa "de dónde vienen los datos"
+(Firebase, una API REST, una base de datos local...) de "qué se hace con
+ellos" (el ViewModel). Si mañana cambiáramos Realtime Database por otra
+fuente de datos, solo habría que reescribir el repositorio; el ViewModel y
+la pantalla no se enterarían.
+
+### 8.2 El repositorio: `UsuarioRepository`
+
+Fichero: `app/src/main/java/.../ui/RealTimeDB/UsuarioRepository.kt`
+
+```kotlin
+class UsuarioRepository {
+    private val usuariosReference = FirebaseDatabase.getInstance()
+        .getReference(Colecciones.usuarios)
+
+    val usuarios: Flow<Result<List<Usuario>>> = callbackFlow {
+        val listener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val listaDeUsuarios = snapshot.children.mapNotNull { child ->
+                    child.getValue(Usuario::class.java)?.let { usuarioSinId ->
+                        usuarioSinId.copy(id = child.key)
+                    }
+                }
+                trySend(Result.success(listaDeUsuarios))
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                trySend(Result.failure(error.toException()))
+                close(error.toException())
+            }
+        }
+
+        usuariosReference.addValueEventListener(listener)
+        awaitClose { usuariosReference.removeEventListener(listener) }
+    }
+
+    fun agregar(usuario: Usuario): Task<Void> {
+        val reference = usuariosReference.push()
+        val usuarioConId = usuario.copy(id = reference.key)
+        return reference.setValue(usuarioConId)
+    }
+
+    fun borrarPorId(usuarioId: String): Task<Void> =
+        usuariosReference.child(usuarioId).removeValue()
+    // ...
+}
+```
+
+Puntos didácticos:
+
+- **`callbackFlow`**: convierte una API basada en *listeners* (lo normal en
+  Firebase) en un `Flow` de Kotlin, que es lo que se consume con
+  corrutinas. Es el puente entre el "mundo callbacks" de Firebase y el
+  "mundo `Flow`" de Kotlin.
+- **`ValueEventListener`**: Realtime Database lo llama **cada vez que
+  cambian los datos del nodo** (`onDataChange`), no solo la primera vez. Por
+  eso es "reactivo": si otro dispositivo añade un usuario, todos los
+  clientes conectados reciben la lista actualizada automáticamente, sin
+  pedirla manualmente.
+- **`trySend(...)`**: envía un valor nuevo al `Flow` cada vez que llega un
+  evento. Aquí se envía un `Result<List<Usuario>>` en vez de una simple
+  lista, para poder distinguir "lista vacía" (éxito, pero sin datos) de
+  "ha fallado la lectura" (por ejemplo, sin permisos o sin conexión).
+- **`awaitClose { ... }`**: se ejecuta cuando el `Flow` se cancela (por
+  ejemplo, al destruirse el ViewModel). Aquí se usa para **darse de baja**
+  del listener (`removeEventListener`); si no lo hiciéramos, seguiríamos
+  escuchando cambios en Firebase aunque ya nadie los necesite (fuga de
+  listeners).
+- **El `id` no viene en los datos**: en Realtime Database, la clave de cada
+  usuario (`child.key`, algo como `-Nabc123`) es la ruta del nodo, no un
+  campo más dentro de él. Por eso se copia manualmente con
+  `usuarioSinId.copy(id = child.key)`.
+- **Operaciones de escritura devuelven `Task`**: `agregar`, `borrarPorId`,
+  etc. no manejan el error dentro del repositorio, simplemente devuelven el
+  `Task` que da Firebase. Es el ViewModel quien decide qué hacer si falla
+  (loguear, mostrar un mensaje...). El repositorio solo sabe **cómo pedirle
+  los datos a Firebase**, no qué hacer con los resultados.
+
+### 8.3 El ViewModel: `MiViewModelRealtime`
+
+```kotlin
+class MiViewModelRealtime(
+    private val repository: UsuarioRepository = UsuarioRepository()
+) : ViewModel() {
+
+    private val _usuarios = MutableStateFlow<List<Usuario>>(emptyList())
+    val usuarios = _usuarios.asStateFlow()
+
+    private val _codigoError = MutableStateFlow(0)
+    val codigoError = _codigoError.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            repository.usuarios.collectLatest { resultado ->
+                resultado
+                    .onSuccess { lista ->
+                        _usuarios.value = lista
+                        _codigoError.value = if (lista.isEmpty()) 2 else 0
+                    }
+                    .onFailure { exception ->
+                        _codigoError.value = 1
+                        _errorMessage.value = exception.message
+                    }
+            }
+        }
+    }
+
+    fun agregarUsuario(usuario: Usuario) {
+        repository.agregar(usuario).addOnFailureListener { error ->
+            Log.w(TAG, "Error al agregar usuario", error)
+        }
+    }
+}
+```
+
+Nota el **inyección de dependencias por constructor con valor por defecto**:
+`private val repository: UsuarioRepository = UsuarioRepository()`. Esto
+permite que en producción el ViewModel cree su propio repositorio
+automáticamente (`MiViewModelRealtime()`), pero en un test se podría pasar
+un repositorio falso (`MiViewModelRealtime(repositorioFalso)`) sin tocar
+Firebase de verdad.
+
+- **`collectLatest` dentro de `init`**: en cuanto se crea el ViewModel, se
+  suscribe al `Flow` del repositorio y empieza a recibir listas de usuarios
+  para siempre (hasta que el ViewModel se destruye). Como el `Flow` viene de
+  un `callbackFlow` "en caliente" conectado a Firebase, cada cambio en la
+  base de datos dispara una nueva emisión y el `StateFlow` `_usuarios` se
+  actualiza solo.
+- **`codigoError` como código numérico** (`0` = todo bien, `1` = error de
+  lectura, `2` = lista vacía): es una forma sencilla (aunque poco elegante)
+  de que la UI distinga varios estados sin necesitar una `sealed class`.
+  Se podría mejorar con un `enum class` o una `sealed interface
+  EstadoUsuarios`, pero el código numérico es más fácil de seguir para
+  empezar.
+- Las funciones `agregarUsuario`, `borrarUsuario`, `borrarUsuarioPorId` y
+  `borrarUsuariosMenoresDeEdad2()` **no tocan el `Flow` de usuarios**: solo
+  piden al repositorio que escriba o borre datos en Firebase. La lista
+  (`_usuarios`) se actualiza sola gracias al `ValueEventListener` que ya
+  está escuchando; no hace falta refrescarla a mano.
+
+### 8.4 La pantalla
+
+```kotlin
+val usuarios by miViewModelRTDB.usuarios.collectAsState()
+val codigoError by miViewModelRTDB.codigoError.collectAsState()
+
+if (codigoError == 2) {
+    Text("Lista vacía", color = MaterialTheme.colorScheme.error)
+} else {
+    LazyColumn { items(usuarios) { usuario -> /* ... */ } }
+}
+
+Button(onClick = { miViewModelRTDB.agregarUsuario(Factoria.getUsuario()) }) {
+    Text("Agregar usuario aleatorio")
+}
+```
+
+Mismo patrón que en el login: la pantalla observa `StateFlow` con
+`collectAsState()` y llama a funciones del ViewModel en los `onClick`. No
+hay ni una sola línea de Firebase en este fichero.
+
+---
+
+## 9. El chat: dos formas de implementar lo mismo
+
+El chat (`ChatUI.kt`) se puede alimentar de **dos bases de datos distintas**
+sin que la pantalla lo note, porque ambos ViewModels exponen exactamente la
+misma "interfaz" (`mensajes` y `sendMessage(sender, text)`):
+
+- `ChatViewModel` + `MensajeRepository` → **Realtime Database**.
+- `ChatViewModel_FireStore` + `MensajeFirestoreRepository` → **Firestore**.
+
+```kotlin
+// En MainActivity.kt, basta con cambiar el ViewModel que se le pasa a la
+// pantalla para cambiar de base de datos sin tocar ChatUI.kt:
+val miChatVM: ChatViewModel = viewModel()
+ChatScreen(navController = navController, viewModel = miChatVM, loginViewModel = viewModel)
+// ChatScreen(navController = navController, viewModel = miChatVM_Firestore, loginViewModel = viewModel)
+```
+
+Esto es la prueba de que el patrón Repository funciona: **la UI depende de
+una abstracción (un ViewModel con `mensajes` y `sendMessage`), no de una
+implementación concreta de base de datos**.
+
+### 9.1 Chat con Realtime Database (`MensajeRepository`)
+
+```kotlin
+class MensajeRepository {
+    private val mensajesReference = FirebaseDatabase.getInstance()
+        .getReference(Colecciones.mensajes)
+
+    val mensajes: Flow<List<Mensaje>> = callbackFlow {
+        val query = mensajesReference.orderByChild("timestamp").limitToLast(50)
+
+        val listener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val lista = snapshot.children
+                    .mapNotNull { it.getValue(Mensaje::class.java) }
+                    .sortedByDescending { it.timestamp }
+                trySend(lista)
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                close(error.toException())
+            }
+        }
+
+        query.addValueEventListener(listener)
+        awaitClose { query.removeEventListener(listener) }
+    }
+
+    fun enviar(sender: String, text: String): Task<Void> {
+        val id = mensajesReference.push().key
+            ?: return Tasks.forException(IllegalStateException("..."))
+
+        return mensajesReference.child(id).setValue(
+            mapOf(
+                "id" to id,
+                "sender" to sender,
+                "text" to text,
+                "timestamp" to ServerValue.TIMESTAMP
+            )
+        )
+    }
+}
+```
+
+Detalles propios de Realtime Database:
+
+- **`limitToLast(50)`**: Realtime Database no tiene un concepto de "primeros
+  N según orden descendente" tan directo como Firestore; para traer los
+  últimos 50 mensajes por fecha hay que pedir `orderByChild("timestamp")` +
+  `limitToLast(50)` y luego **ordenar manualmente en el cliente**
+  (`.sortedByDescending { it.timestamp }`), porque Realtime Database siempre
+  devuelve los resultados en orden ascendente.
+- **`push().key`**: genera una clave única ordenable por tiempo
+  (`-Nabc123...`) sin tener que consultar antes a Firebase ni usar un
+  contador propio. Es el equivalente, en Realtime Database, al
+  "autoincremental" de otras bases de datos.
+- **`ServerValue.TIMESTAMP`**: en vez de usar `System.currentTimeMillis()`
+  del móvil (que podría tener la hora mal puesta), se le pide al
+  **servidor** de Firebase que ponga la hora real en el momento de guardar
+  el dato. Muy importante en un chat, donde el orden de los mensajes
+  depende de esto.
+
+### 9.2 Chat con Firestore (`MensajeFirestoreRepository`)
+
+```kotlin
+class MensajeFirestoreRepository {
+    private val mensajesCollection = FirebaseFirestore.getInstance()
+        .collection(Colecciones.mensajes)
+
+    val mensajes: Flow<List<Mensaje>> = callbackFlow {
+        val registration = mensajesCollection
+            .orderBy("timestamp", Query.Direction.DESCENDING)
+            .limit(50)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    close(error)
+                    return@addSnapshotListener
+                }
+                val mensajes = snapshot?.documents.orEmpty()
+                    .mapNotNull { it.toObject(Mensaje::class.java) }
+                trySend(mensajes)
+            }
+
+        awaitClose { registration.remove() }
+    }
+
+    fun enviar(sender: String, text: String): Task<Void> {
+        val mensaje = Mensaje(
+            id = mensajesCollection.document().id,
+            sender = sender,
+            text = text
+        )
+        return mensajesCollection.document(mensaje.id).set(mensaje)
+    }
+}
+```
+
+Diferencias respecto a la versión de Realtime Database:
+
+- **`orderBy(...).limit(50)` ya devuelve el orden correcto**: no hace falta
+  ordenar a mano en el cliente, Firestore puede ordenar descendente
+  directamente en el servidor (con el índice adecuado).
+- **`addSnapshotListener` en vez de `ValueEventListener`**: es el
+  equivalente de Firestore, también se dispara cada vez que cambian los
+  documentos de la consulta, y también hay que llamar a
+  `registration.remove()` dentro de `awaitClose` para darse de baja.
+- **`document().id` en vez de `push().key`**: Firestore genera un ID
+  aleatorio único para el documento (no ordenable por tiempo como el de
+  Realtime Database); el orden lo da el campo `timestamp`, no el propio id.
+- **`.set(mensaje)` guarda el objeto completo** (Firestore sabe serializar
+  `data class` directamente a un documento), mientras que en Realtime
+  Database se construyó un `Map` a mano para poder meter
+  `ServerValue.TIMESTAMP` (un marcador especial que Realtime Database
+  sustituye por la hora del servidor al guardar).
+
+### 9.3 El `ChatViewModel`: igual de delgado en ambos casos
+
+```kotlin
+class ChatViewModel(
+    private val repository: MensajeRepository = MensajeRepository()
+) : ViewModel() {
+    val mensajes: Flow<List<Mensaje>> = repository.mensajes
+
+    fun sendMessage(sender: String, text: String) {
+        repository.enviar(sender, text).addOnFailureListener { error ->
+            Log.w("ChatViewModel", "Error al enviar el mensaje", error)
+        }
+    }
+}
+```
+
+`ChatViewModel_FireStore` es idéntico, cambiando solo el tipo del
+repositorio. El ViewModel ya no sabe (ni le importa) si los mensajes vienen
+de Realtime Database o de Firestore: solo expone un `Flow<List<Mensaje>>`
+y una función para enviar. Esta es la ventaja real del patrón Repository:
+**el mismo ViewModel (o uno casi idéntico) sirve para cualquier fuente de
+datos** que se ajuste a la misma forma.
+
+---
+
+## 10. Realtime Database vs. Firestore: ¿cuál elegir?
+
+Ambas son bases de datos NoSQL de Firebase, reactivas (avisan a los
+clientes cuando algo cambia) y con SDKs muy parecidos, pero no son
+intercambiables en todos los casos. Esta tabla resume las diferencias más
+importantes para un proyecto de clase:
+
+| Aspecto | Realtime Database | Firestore |
+|---|---|---|
+| Modelo de datos | Un único árbol JSON gigante | Colecciones de documentos (como "carpetas" de JSON), que a su vez pueden tener subcolecciones |
+| Consultas | Muy limitadas: solo se puede ordenar/filtrar por **un** campo a la vez (`orderByChild` + un filtro) | Mucho más potentes: se pueden combinar varios `where`, rangos, `orderBy` en varios campos (con índices compuestos) |
+| Orden de resultados | Siempre ascendente; para "los últimos N" hay que pedir `limitToLast` y ordenar en el cliente | Se puede pedir `orderBy(..., DESCENDING)` directamente en el servidor |
+| Escalado / estructura | Al crecer, el árbol único se puede volver difícil de organizar y es fácil des-normalizar mal los datos | Las colecciones/documentos escalan mejor y son más fáciles de estructurar en proyectos grandes |
+| Latencia | Muy baja, pensada para datos que cambian constantemente (juegos, presencia online, chats en tiempo real) | Ligeramente mayor, pero sigue siendo "tiempo real" para la mayoría de apps |
+| Precio | Se cobra sobre todo por **ancho de banda** (cuántos datos se transfieren) | Se cobra sobre todo por **número de lecturas/escrituras/borrados**, independientemente del tamaño |
+| Consultas offline | Limitado | Soporte offline más completo y robusto (cache local automática) |
+| Seguridad (reglas) | Reglas en forma de árbol JSON, pueden ser difíciles de leer en estructuras grandes | Reglas por colección/documento, generalmente más legibles |
+| Curva de aprendizaje | Más sencilla para cosas pequeñas (todo es un `Map`/`JSON`) | Un poco más de conceptos (colección, documento, subcolección), pero se entiende bien con la analogía de "carpetas y ficheros" |
+
+### ¿Cuándo usar cada una?
+
+- **Realtime Database** encaja bien cuando los datos son simples, cambian
+  muy rápido y no necesitas consultas complejas: presencia ("¿quién está
+  conectado ahora?"), contadores en vivo, chats sencillos, juegos
+  multijugador ligeros. En este proyecto, el chat con Realtime Database
+  (`ChatViewModel`) es un buen ejemplo: solo necesitamos "los últimos 50
+  mensajes ordenados por fecha", nada más complejo.
+- **Firestore** encaja mejor cuando la app va a crecer, necesitas filtrar
+  por varios campos a la vez (como hace `UsuarioRepository.usuariosConParte()`
+  o `usuariosEntreEdades()` en el proyecto de ejemplo del repositorio de
+  Firestore), quieres soporte offline sólido, o simplemente prefieres
+  trabajar con una estructura de "colecciones y documentos" más parecida a
+  una base de datos tradicional.
+
+En este proyecto convivir ambas en el mismo chat es sobre todo un ejercicio
+didáctico: ver **el mismo problema** (guardar y escuchar una lista de
+mensajes en tiempo real) resuelto con dos tecnologías distintas, usando
+**exactamente la misma arquitectura** (Repository + ViewModel delgado +
+pantalla "tonta"). Eso es lo más importante de esta sección: la base de
+datos cambia, pero la forma de organizar el código no tiene por qué
+cambiar.
+
+---

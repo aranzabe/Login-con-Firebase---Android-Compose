@@ -43,7 +43,7 @@ fun ChatScreen(
 ) {
     val TAG = "Fernando"
     val contexto = LocalContext.current
-    val mensajesUI by viewModel.mensajes.collectAsState()
+    val mensajesUI by viewModel.mensajes.collectAsState(initial = emptyList())
     var inputMessage by remember { mutableStateOf("") }
 
     val listState = rememberLazyListState() //Estado del scroll para desplazar los mensajes y que el último esté siempre abajo.
